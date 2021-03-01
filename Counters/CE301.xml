@@ -1,0 +1,12 @@
+<counter>
+    <name>CE301</name>
+    <address>141227285</address>
+    <password>777777</password>
+    <snumber>008841060001201</snumber>
+    <maker>energomera</maker>
+    <version>v10</version>
+    <model>3</model>
+	<random>1</random>
+	<datecheck>0</datecheck>
+	<respondtimeout>500</respondtimeout>
+</counter>

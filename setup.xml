@@ -1,0 +1,5 @@
+<setup>
+    <counter_name>CE303</counter_name>
+    <baudRate>9600</baudRate>
+    <port>5</port>
+</setup>
