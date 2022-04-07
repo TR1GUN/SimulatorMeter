@@ -7,6 +7,7 @@ import time
 import os
 from xml.dom import minidom
 import json
+from DataBase_SimulatorMeter import Meter_DataBase
 
 # Для начала пропишем наш файл со значениями
 path = '/'.join((os.path.abspath(__file__).replace('\\', '/')).split('/')[:-1])
@@ -14,6 +15,7 @@ times = 1
 
 # Получаем файл с параметрами
 valuesbank = xmltree.parse(path + '/values.xml').getroot()
+path_db = path
 
 
 def parse_values():
@@ -57,7 +59,8 @@ class SimulatorMeterEnergomera:
     """
      Эмулятор Счетчика ЭНЕРГОМЕРА 303\301
     """
-    # Поля котоыре нужны для составления пакетов по протоколу МЭК
+
+    # Поля которые нужны для составления пакетов по протоколу МЭК
     soh = b'\x01'
     stx = b'\x02'
     etx = b'\x03'
@@ -71,6 +74,7 @@ class SimulatorMeterEnergomera:
     lbrace = b''
     rbrace = b''
     c = b''
+    close = b'\x01B0\x03u'
     # Тип полученной команды
     type = None
     # Генерируемый ответ
@@ -98,6 +102,11 @@ class SimulatorMeterEnergomera:
     # Список ассоциаций запросов
     tags = {}
 
+    # ОЧЕНЬ ВАЖНАЯ ШТУКА - Серийник
+    serial = None
+
+    model = ''
+
     def __init__(self, request=b'\x01B0\x03u'):
         """
         Здесь инициализируем все значения с которыми можно будет работать. Это важно
@@ -105,6 +114,7 @@ class SimulatorMeterEnergomera:
         Подача параметра не обязательна
         :param request: Команда - по умолчанию стоит команда нет - Если подразумевается рабоат с обьектом класса - не подавать.
         """
+
         # Переопределяем основные поля :
         # Поле Ответа
         self.response_answer = None
@@ -161,12 +171,15 @@ class SimulatorMeterEnergomera:
             b'ACCES': 'Journal'
         }
 
+        # ЗАгружаем нашу БД архивных записей
+        self.Meter_DataBase = Meter_DataBase(path=path_db)
+
         # Определяем наш словарь который содержит значения данных
         self.valuesbank = \
             {
                 "const": 1.0,
-                "kI": 0.99,
-                "kU": 0.99,
+                # "kI": 0.99,
+                # "kU": 0.99,
                 "isAm": True,
                 "isClock": True,
                 "isCons": True,
@@ -186,7 +199,16 @@ class SimulatorMeterEnergomera:
                 "model": "CE303",
 
                 # БУФЕР
-                'Journal': ['ERROR - buffer empty']
+                'Journal': ['ERROR - buffer empty'],
+
+                # Показания Энергии
+                'ElectricEnergyValues': {},
+                # Показания Сети
+                'ElectricQualityValues': {},
+                # Профиль Мощности
+                'ElectricPowerValues': {},
+
+
             }
 
         # Теперь - Определяем путь до xml которая содержит конфигурацию счетчика
@@ -198,6 +220,8 @@ class SimulatorMeterEnergomera:
         # Читаем эти данные из xml
         self._counter = EMeter(counter_meter)
 
+        # Модель - перезаполняем поле
+        self.model = str(self._counter.model)
         # Служебные настройки - хз для чего
         self.times = 1
         self.datecheck = int(self._counter.datecheckmode)
@@ -216,7 +240,7 @@ class SimulatorMeterEnergomera:
         # Серийный порт - ПОКА ФУНКЦИОНАЛ ВЫРЕЗАН
         # self._serial = ser
 
-        # Переопределяем перемсенные оссновных команд
+        # Переопределяем перемсенные основных команд
         self.start = b''
         self.address = b''
         self.exclam = b''
@@ -232,12 +256,13 @@ class SimulatorMeterEnergomera:
 
         # ТЕПЕРЬ ГОТОВЫ К РАБОТЕ :
         # разобрать запрос и сгенерировать ответ
-        self.request = request
-        self._response = request
-        # Запускаем -
-        self.response_answer = self.__parse_request()
+        # self.request = request
+        # self._response = request
+        # # Запускаем -
+        # self.response_answer = self.__parse_request()
         # после того как дали ответ - записываем дату ответа
         self.record_timenow()
+
 
     # -------------------------------ОСНОВНАЯ КОМАНДА РАБОТЫ С ВИРТУАЛЬНЫМ СЧЕТЧИКОМ------------------------------------
 
@@ -254,11 +279,43 @@ class SimulatorMeterEnergomera:
         # Запускаем -
         self.response_answer = self.__parse_request()
         # после того как дали ответ - записываем дату ответа
-        self.record_timenow()
+        # self.record_timenow()
 
         return self.response_answer
 
+    # ---------------------------------------------УСТАНОВКА СЕРИЙНИКА------------------------------------------------
+    def Set_Serial(self, serial):
+        """
+        Этот метод используется для того чтоб задать серийный номер счетчика
+        :param serial:
+        :return:
+        """
+        self.serial = serial
+    # ---------------------------------------------УСТАНОВКА СЕРИЙНИКА------------------------------------------------
+    def Set_Data(self, data):
+        """
+        Этот метод используется для того чтоб задать данные в формате JSON что записываем
+        :param data:
+        :return:
+        """
+        vals = data.get('vals')
+
+        # Проверяем валидацию json
+        try:
+            element = vals[0]["tags"][0]["tag"]
+
+            # ТЕПЕРЬ НАДО ПОНЯТЬ МЫ ПОЛУЧИЛИ ЖУРНАЛЫ ИЛИ НЕТ
+            if element in ['event', 'eventId', 'journalId']:
+                # если получили журналы , то записываем их в буффер журналов
+                self.__adding_journal_values(vals)
+            # иначе - опускаем в перезапись по таймштапам
+            else:
+                self.__adding_values_from_json(vals)
+        except:
+            print('***ERROR : ВАЛИДАЦИЯ JSON НЕУСПЕШНА***')
+
     # -------------------------------СЛУЖЕБНЫЕ КОМАНДЫ РАБОТЫ С ВИРТУАЛЬНЫМ СЧЕТЧИКОМ----------------------------------
+
     # Функция загрузки параметров из values.xml
     def __load_parametrs_from_xml(self):
         """
@@ -307,9 +364,8 @@ class SimulatorMeterEnergomera:
                 element = vals[0]["tags"][0]["tag"]
 
                 # ТЕПЕРЬ НАДО ПОНЯТЬ МЫ ПОЛУЧИЛИ ЖУРНАЛЫ ИЛИ НЕТ
-                if element in ['event', 'eventId', 'journalID']:
+                if element in ['event', 'eventId', 'journalId']:
                     # если получили журналы , то записываем их в буффер журналов
-
                     self.__adding_journal_values(vals)
                 # иначе - опускаем в перезапись по таймштапам
                 else:
@@ -332,7 +388,6 @@ class SimulatorMeterEnergomera:
         for i in range(len(vals)):
             tags_dict = {}
             # Если нет
-
             # ЗАПОЛНЯЕМ НАШ СЛОВАРЬ ЗНАЧЕНИЯМИ
             for x in range(len(vals[i]["tags"])):
                 tag = vals[i]["tags"][x]["tag"]
@@ -342,10 +397,20 @@ class SimulatorMeterEnergomera:
             # а не - лучше использовать юникс тайм
             unix_time = vals[i]["time"]
             valuesbank_dict[unix_time] = tags_dict
+# ------------------------------------------------>
+            # Если нам попался профиль мощности - добавляем в него
+            if vals[i].get('type') in 'ElArr1ConsPower':
+                self.valuesbank['ElectricPowerValues'][unix_time] = tags_dict
+# ------------------------------------------------>
         # СТАВИМ ПОСЛЕДНЫЙ ТАЙМШТАМП В КАЧЕСТВЕ ЗНАЧЕНЯИ ПО УМОЛЧАНИЮ
         self.valuesbank['time'] = unix_time
-        # ПОСЛЕДНИЙ ТАЙМШТАМП обновляем ключ NOW
-        self.valuesbank['NOW'].update(valuesbank_dict[unix_time])
+        # ПОСЛЕДНИЙ ТАЙМШТАМП обновляем ключ NOW или с таймштампом 0
+        # ЕСли таймштамп со значением 0 есть - то его загружаем в текущие
+        if valuesbank_dict.get(0) is not None:
+            self.valuesbank['NOW'].update(valuesbank_dict[0])
+        # Если нет - То ставим в текущие послений таймштамп
+        else:
+            self.valuesbank['NOW'].update(valuesbank_dict[unix_time])
         # остальные таймштампы записываем в основной словарь
         self.valuesbank.update(valuesbank_dict)
 
@@ -379,12 +444,13 @@ class SimulatorMeterEnergomera:
                 3: 5,
 
             }
-
         # Создаем буффер определенной длины - а именно количеству таймштампов в JSON
         journal_buffer = [None] * len(json_values)
+
         # Теперь - берем и правильно его заполняем
         for i in range(len(json_values)):
             # Сначала берем время
+
             timestamp = datetime.fromtimestamp(json_values[i]['time'])
             # Теперь делаем из него запис
             timestamp = str(timestamp.day) + '-' + str(timestamp.month) + '-' + str(timestamp.year)[-2:] + '-' + \
@@ -400,9 +466,9 @@ class SimulatorMeterEnergomera:
             # Теперь можно делать с ними разные манипуляции
 
             # Буффер - Выход за пределы минимального\максимального значения напряжения фазы
-            if tags_dict['journalID'] in [20, 21, 22, 23, 24, 25]:
+            if tags_dict['journalId'] in [20, 21, 22, 23, 24, 25]:
                 # Берем позицию байта
-                position = byte_position[tags_dict['journalID']]
+                position = byte_position[tags_dict['journalId']]
                 # упаковываем наш байт
                 value_bytes = ''
                 for byte in range(6):
@@ -421,10 +487,10 @@ class SimulatorMeterEnergomera:
                 # После чего добавляем ее по индексу в массив
 
             # Буффер - Включение/выключение фазы , включение выключения счетчика
-            elif tags_dict['journalID'] in [1, 9, 10, 11]:
+            elif tags_dict['journalId'] in [1, 9, 10, 11]:
 
                 # Берем позицию байта
-                position = byte_position[tags_dict['journalID']]
+                position = byte_position[tags_dict['journalId']]
                 # упаковываем наш байт
                 value_bytes = ''
                 for byte in range(8):
@@ -443,25 +509,26 @@ class SimulatorMeterEnergomera:
                 # После чего добавляем ее по индексу в массив
 
             # Буффер - Корекция времени
-            elif tags_dict['journalID'] in [2]:
+            elif tags_dict['journalId'] in [2]:
                 # Берем значение времени - изменяем
                 timestamp = timestamp.replace('-', '/')
                 # Добавляем к нему цифру на которую изменили
-                value_bytes = tags_dict['event']
+                # value_bytes = tags_dict['event']
+                value_bytes = 1
                 journal_record = timestamp + str(value_bytes)
                 # После чего добавляем ее по индексу в массив
             # Буффер - Несанкционированный доступ (вскрытие/закрытие заводской крышки)
-            elif tags_dict['journalID'] in [8]:
+            elif tags_dict['journalId'] in [8]:
                 # Здесь все просто - добавляем время
                 journal_record = timestamp[:-1]
 
             # Журнал тарифов
-            elif tags_dict['journalID'] in [6]:
+            elif tags_dict['journalId'] in [6]:
                 journal_record = timestamp + '8'
 
 
             # Журнал Сброса накопленных параметров
-            elif tags_dict['journalID'] in [3]:
+            elif tags_dict['journalId'] in [3]:
                 journal_record = timestamp + '32'
 
             # ИНАЧЕ - ЗАПОЛНЯЕМ НАШ БуФЕР ошибкой
@@ -469,7 +536,7 @@ class SimulatorMeterEnergomera:
                 journal_record = 'ERR12'
 
             # после чего заполянем буффер
-            journal_buffer[tags_dict['eventId'] - 1] = journal_record
+            journal_buffer[tags_dict['eventId']] = journal_record
         Journal = {'Journal': journal_buffer}
         self.valuesbank.update(Journal)
 
@@ -486,11 +553,16 @@ class SimulatorMeterEnergomera:
         request = self.request
 
         # Структурируем
-        self.start = struct.pack('b', request[0])
+        try:
+            self.start = struct.pack('b', request[0])
+        except:
+            print('ERROR - Неверное число', request[0])
+            self.start = struct.pack('b', 1)
         #
         try:
             self.__parse_comand(command=self.start)
         except:
+
             # Итак - если у нас лажанула команда - то отправляем команду НЕ ПОНЕЛ
             print('*************************НЕ ПРАВИЛЬНАЯ КОМАНДА*************************\n ',
                   '*************************** ПЕРЕЗАПРАШИВАЕМ ***************************')
@@ -621,6 +693,7 @@ class SimulatorMeterEnergomera:
             # блок запроса данных - основные страдания проходят именнов этом блоке -
             # Здесь уже нельзя быть косипошей чтоб Ничего не сломать
             elif self.c == b'R':  # data request block
+
                 self.type = 'CMD'
                 tmp = self.stx
                 self.d = struct.pack('b', self._response[2])
@@ -628,23 +701,26 @@ class SimulatorMeterEnergomera:
                 # Парсим всю команду в кодирвоке энергомеры - Нужна чтоб вытащить время
                 self.comand_energomera_protocol = self._response[4:-2]
                 # Парсим просто команду, без скобок
-                self.data = self._response[4:9]
+                self.data = bytes(self._response[4:9])
                 # получение данных в первый раз
                 # Пытаемся по команде узнать что надо отвечать
                 try:  # getting data first time
-
                     # Итак , опускаем в нашу функцию парсинга времени
                     # Опускаем нашу команду в словарь со всеми командами которые учтены тут
                     self.__definion_datetime()
-
+                    # ТЕПЕРЬ ИЩЕМ НУЖНУЮ КОМАНДУ ЧТОБ ВЫЛОВИТЬ НУЖНЫЕ ЗНАЧЕНИЯ
                     self.dataargs = self.args.get(self.data, self.get_random_bytes)(self, 1)
+
                 except Exception as e:
-                    print('ОШИБКА',e)
+                    print('ОШИБКА', e)
+                    self.dataargs = b''
                 self.lbrace = struct.pack('b', self._response[9])
                 self.readen_args = bytes(self._response[10:len(self._response) - 3])
                 self.rbrace = struct.pack('b', self._response[len(self._response) - 3])
+
                 # проверяем, нужно ли использовать дополнительные аргументы
                 if len(self.readen_args) == 0:  # check if we have to use additional arguments
+
                     tmp += bytes(self.data + self.lbrace + self.dataargs + self.rbrace + self.cr + self.lf)
                     t = 2
                     self.answerbank['CMD'] = tmp + self.etx + calcbcc(tmp[1:] + self.etx)
@@ -653,10 +729,14 @@ class SimulatorMeterEnergomera:
                         try:
                             self.dataargs = self.args.get(self.data, self.get_random_bytes)(self, t)
                         except Exception as e:
-                            print('ОШИБКА',e)
+                            print('ОШИБКА', e)
                         tmp += bytes(self.data + self.lbrace + self.dataargs + self.rbrace + self.cr + self.lf)
                         self.answerbank['CMD'] = tmp + self.etx + calcbcc(tmp[1:] + self.etx)
                         t += 1
+                # Если значения нет , то отвечаем пустотой - нужно для архивных записей
+                elif self.dataargs == b'':
+                    self.answerbank['CMD'] = self.stx + self.etx + self.dataargs + self.etx
+
                 else:
                     t = 2
                     tmp += bytes(
@@ -667,7 +747,7 @@ class SimulatorMeterEnergomera:
                         try:
                             self.dataargs = self.args.get(self.data, self.get_random_bytes)(self, t)
                         except Exception as e:
-                            print('ОШИБКА',e)
+                            print('ОШИБКА', e)
                         tmp += bytes(
                             self.data + self.lbrace + self.dataargs + self.rbrace + self.cr + self.lf)
                         self.answerbank['CMD'] = tmp + self.etx + calcbcc(tmp[1:] + self.etx)
@@ -746,7 +826,8 @@ class SimulatorMeterEnergomera:
                 # МГНОВЕННЫЕ ПОКАЗАНИЯ !!!
             }
         # Ищем нашу команду в списке выше
-        type_date = type_datetime.get(self.data)
+        data = bytes(self.data)
+        type_date = type_datetime.get(data)
 
         if type_date is not None:
             # Далее опускаем в функцию перезаписи нашего попаденца
@@ -870,6 +951,7 @@ class SimulatorMeterEnergomera:
             # --
             # values_dict = self.values_dict_with_timestamp[find_date]
             # --
+
             values_dict = self.valuesbank.get(find_date)
             # --
             if values_dict is not None:
@@ -878,6 +960,139 @@ class SimulatorMeterEnergomera:
                 for key in values_dict.keys():
                     correct_values_dict[type_date + str(key)] = values_dict[key]
 
+
+                # После чего обновляем наш список
+                self.valuesbank['NOW'].update(correct_values_dict)
+            # Итак - если у нас пустые значения - То обнуляем все значения - Для получения пустых значений
+            else:
+
+                # Если не находим нужный таймштамп - ставим пометкуу что измерения не проводились
+                no_measurements_were_taken_dict = \
+                    {
+                        # Срез по дням
+                        'd':
+                            {
+                                'dA+0': None,
+                                'dA+1': None,
+                                'dA+2': None,
+                                'dA+3': None,
+                                'dA+4': None,
+                                'dA+5': None,
+                                'dA-0': None,
+                                'dA-1': None,
+                                'dA-2': None,
+                                'dA-3': None,
+                                'dA-4': None,
+                                'dA-5': None,
+                                'dR+0': None,
+                                'dR+1': None,
+                                'dR+2': None,
+                                'dR+3': None,
+                                'dR+4': None,
+                                'dR+5': None,
+                                'dR-0': None,
+                                'dR-1': None,
+                                'dR-2': None,
+                                'dR-3': None,
+                                'dR-4': None,
+                                'dR-5': None
+                            },
+                        # Срез по месяцам
+                        'M':
+                            {
+
+                                'MA+0': None,
+                                'MA+1': None,
+                                'MA+2': None,
+                                'MA+3': None,
+                                'MA+4': None,
+                                'MA+5': None,
+                                'MA-0': None,
+                                'MA-1': None,
+                                'MA-2': None,
+                                'MA-3': None,
+                                'MA-4': None,
+                                'MA-5': None,
+                                'MR+0': None,
+                                'MR+1': None,
+                                'MR+2': None,
+                                'MR+3': None,
+                                'MR+4': None,
+                                'MR+5': None,
+                                'MR-0': None,
+                                'MR-1': None,
+                                'MR-2': None,
+                                'MR-3': None,
+                                'MR-4': None,
+                                'MR-5': None
+                            },
+                        # Срез по дням потребление
+                        'dC':
+                            {
+                                'dCA+0': None,
+                                'dCA+1': None,
+                                'dCA+2': None,
+                                'dCA+3': None,
+                                'dCA+4': None,
+                                'dCA+5': None,
+                                'dCA-0': None,
+                                'dCA-1': None,
+                                'dCA-2': None,
+                                'dCA-3': None,
+                                'dCA-4': None,
+                                'dCA-5': None,
+                                'dCR+0': None,
+                                'dCR+1': None,
+                                'dCR+2': None,
+                                'dCR+3': None,
+                                'dCR+4': None,
+                                'dCR+5': None,
+                                'dCR-0': None,
+                                'dCR-1': None,
+                                'dCR-2': None,
+                                'dCR-3': None,
+                                'dCR-4': None,
+                                'dCR-5': None,
+                            },
+                        # Срез по месяцам потребление
+                        'MC':
+                            {
+                                'MCA+0': None,
+                                'MCA+1': None,
+                                'MCA+2': None,
+                                'MCA+3': None,
+                                'MCA+4': None,
+                                'MCA+5': None,
+                                'MCA-0': None,
+                                'MCA-1': None,
+                                'MCA-2': None,
+                                'MCA-3': None,
+                                'MCA-4': None,
+                                'MCA-5': None,
+                                'MCR+0': None,
+                                'MCR+1': None,
+                                'MCR+2': None,
+                                'MCR+3': None,
+                                'MCR+4': None,
+                                'MCR+5': None,
+                                'MCR-0': None,
+                                'MCR-1': None,
+                                'MCR-2': None,
+                                'MCR-3': None,
+                                'MCR-4': None,
+                                'MCR-5': None,
+                            },
+                        # профили мощности первого архива электросчетчика - те что каждые пол часа
+                        'DP':
+                            {
+                                'DPP+': None,
+                                'DPP-': None,
+                                'DPQ+': None,
+                                'DPQ-': None
+                            },
+                    }
+                # Теперь - Получаем наши значения
+                correct_values_dict = no_measurements_were_taken_dict[type_date]
                 # После чего обновляем наш список
                 self.valuesbank['NOW'].update(correct_values_dict)
 
@@ -942,10 +1157,25 @@ class SimulatorMeterEnergomera:
             # Берем тэг что нам нужен
             tag = str(self.tags.get(self.data)) + str(t - 1)
             # Теперь по значению этого тэга ищем значение в нашем словаре
-            var = float(self.valuesbank['NOW'][tag]) / 1000
+
+            # ++ Заглушка - если значения нет в наших значениях
+            var = self.valuesbank['NOW'].get(tag)
+            # if var is not None:
+            #
+            #     var = float(var) / 1000
+            #     # Теперь берем и округляем
+            #     var = float('{:.6f}'.format(var))
+            #     var = str(var)
+            # else:
+            #     var = ''
+
+            if var is  None:
+                var = 0
+            var = float(var) / 1000
             # Теперь берем и округляем
             var = float('{:.6f}'.format(var))
             var = str(var)
+
             # Если ломается - то идем по старому сценарию
         return var.encode()
 
@@ -980,7 +1210,8 @@ class SimulatorMeterEnergomera:
             # Берем тэг что нам нужен
             tag = str(self.tags.get(self.data)) + str(t - 1)
             # Теперь по значению этого тэга ищем значение в нашем словаре
-            var = float(self.valuesbank['NOW'][tag])
+            var = self.valuesbank['NOW'][tag]
+            var = float(var)
             var = str(var)
             # Если ломается - то идем по старому сценарию
         return var.encode()
@@ -996,7 +1227,8 @@ class SimulatorMeterEnergomera:
             # Берем тэг что нам нужен
             tag = str(self.tags.get(self.data))
             # Теперь по значению этого тэга ищем значение в нашем словаре
-            var = float(self.valuesbank['NOW'][tag]) / 1000
+            var = self.valuesbank['NOW'][tag]
+            var = float(var) / 1000
             var = str(var)
             # Если ломается - то идем по старому сценарию
         return var.encode()
@@ -1012,7 +1244,8 @@ class SimulatorMeterEnergomera:
             # Берем тэг что нам нужен
             tag = str(self.tags.get(self.data))
             # Теперь по значению этого тэга ищем значение в нашем словаре
-            var = float(self.valuesbank['NOW'][tag]) / 1000
+            var = self.valuesbank['NOW'][tag]
+            var = float(var) / 1000
             var = str(var)
             # Если ломается - то идем по старому сценарию
         return var.encode()
@@ -1031,6 +1264,7 @@ class SimulatorMeterEnergomera:
             tag = str(self.tags.get(self.data)) + str(tag_dict[t - 1])
             # tag = str(self.tags.get(self.data)) + str(t - 1)
             # Теперь по значению этого тэга ищем значение в нашем словаре
+
             var = float(self.valuesbank['NOW'][tag]) / 1000
             var = str(var)
             # Если ломается - то идем по старому сценарию
@@ -1050,6 +1284,7 @@ class SimulatorMeterEnergomera:
             tag = str(self.tags.get(self.data)) + str(tag_dict[t - 1])
             # tag = str(self.tags.get(self.data)) + str(t - 1)
             # Теперь по значению этого тэга ищем значение в нашем словаре
+
             var = float(self.valuesbank['NOW'][tag]) / 1000
             var = str(var)
             # Если ломается - то идем по старому сценарию
@@ -1070,6 +1305,7 @@ class SimulatorMeterEnergomera:
             tag_dict = {0: 'A', 1: 'B', 2: 'C'}
             tag = str(self.tags.get(self.data)) + str(tag_dict[t - 1])
             # Теперь по значению этого тэга ищем значение в нашем словаре
+
             var = float(self.valuesbank['NOW'][tag])
             var = str(var)
             # Если ломается - то идем по старому сценарию
@@ -1088,9 +1324,15 @@ class SimulatorMeterEnergomera:
 
             tag_dict = {0: 'AB', 1: 'BC', 2: 'AC'}
             # Берем тэг что нам нужен
+
             tag = str(self.tags.get(self.data)) + str(tag_dict[t - 1])
             # Теперь по значению этого тэга ищем значение в нашем словаре
             var = float(self.valuesbank['NOW'][tag])
+
+            # ЗДЕСЬ ОЧЕНЬ ВАЖНО AngAC - Надо реверснуть
+            if tag == 'AngAC':
+                var = var * -1
+
             var = str(var)
             # Если ломается - то идем по старому сценарию
 
@@ -1124,7 +1366,6 @@ class SimulatorMeterEnergomera:
         if self._counter.random == '1':
             var = "%.2f" % (100 * random.random())
         else:
-
             tag = str(self.tags.get(self.data))
             # Теперь по значению этого тэга ищем значение в нашем словаре
             var = float(self.valuesbank['NOW'][tag]) / 1000
@@ -1139,7 +1380,15 @@ class SimulatorMeterEnergomera:
 
         global times
         times = 1
-        return str(self._counter.snumber).encode()
+        # ЕСЛИ мы не спустили серийник сверху - то используем стоковый
+
+        if self.serial is None:
+            serial = str(self._counter.snumber).encode()
+        else:
+            serial = str(self.serial)
+            serial = serial.encode()
+
+        return serial
 
     # Номер модели
 
@@ -1149,10 +1398,9 @@ class SimulatorMeterEnergomera:
         times = 1
         # Параметр котоырй парсится из настроек - Couters
         # Подробнее смотри протокол энергомеры - Команда MODEL
-        model = str(self._counter.model)
+        # model =str(self._counter.model)
+        model = self.model
         return model.encode()
-
-
 
     # energy values - ПОКАЗАТЕЛИ ЭНЕРГИИ
     def __get_bytes_for_energy_and_set_times(self, t):  # energy values
@@ -1178,6 +1426,7 @@ class SimulatorMeterEnergomera:
         else:
             tag = str(self.tags.get(self.data))
             # Теперь по значению этого тэга ищем значение в нашем словаре
+
             var = float(self.valuesbank['NOW'][tag])
             var = str(var)
 
@@ -1216,7 +1465,7 @@ class SimulatorMeterEnergomera:
     def __get_NGRAP(self, t):
         """
         Количество суточных профилей нагрузки, хранимых в счетчике при заданном времени усреднения TAVER
-         ПОКА НЕ ИСПОЛЬЗУЕТСЯ
+         ПОКА НЕ ИСПОЛЬЗУЕТСЯ -
         """
 
         NGRAP = 99
@@ -1240,8 +1489,12 @@ class SimulatorMeterEnergomera:
         else:
             isDst = 0
 
-        isDst = str(isDst)
-        return isDst.encode()
+
+
+        isDst = isDst.to_bytes(length=2, byteorder='big')
+        return isDst
+        # isDst = str(isDst)
+        # return isDst.encode()
 
     def __get_pacce(self, t):
 
@@ -1292,46 +1545,54 @@ class SimulatorMeterEnergomera:
     # -----------------------------------------------------------------------------------------------------------------
     # текущая дата
     def __datenow(self, t):  # current date
-        time.sleep(self.respondtimeout)
-        global times
-        times = 1
-        if self.datecheck == 1:
-            if self.datecheckcount == 1:
-                today = date.fromtimestamp(1441043940)
-                # self.datecheckcount = 2
-            if self.datecheckcount == 2:
-                today = date.fromtimestamp(1441054800)
-                # self.datecheckcount = 3
-            if self.datecheckcount == 3:
-                today = date.fromtimestamp(1441054800)
-                # self.datecheckcount = 4
-            if self.datecheckcount == 4:
-                today = date.fromtimestamp(1441054800)
-                self.datecheckcount = 0
-        else:
-            today = date.today()
+
+        # time.sleep(self.respondtimeout)
+        # global times
+        # times = 1
+        # if self.datecheck == 1:
+        #     if self.datecheckcount == 1:
+        #         today = date.fromtimestamp(1441043940)
+        #         # self.datecheckcount = 2
+        #     if self.datecheckcount == 2:
+        #         today = date.fromtimestamp(1441054800)
+        #         # self.datecheckcount = 3
+        #     if self.datecheckcount == 3:
+        #         today = date.fromtimestamp(1441054800)
+        #         # self.datecheckcount = 4
+        #     if self.datecheckcount == 4:
+        #         today = date.fromtimestamp(1441054800)
+        #         self.datecheckcount = 0
+        # else:
+        today = date.today()
+        today = self.time_now.date()
+
         self.datecheckcount += 1
 
         return str(today.strftime("0%w.%d.%m.%y")).encode()
 
     # Текущее время
     def __timenow(self, t):  # current time
+
         global times
         times = 1
-        time.sleep(self.respondtimeout)
-        if self.datecheck == 1:
-            now = datetime.fromtimestamp(2)
-        elif self.datecheck == 2:
-            now = datetime.fromtimestamp(1)
-        else:
+        # time.sleep(self.respondtimeout)
+        # if self.datecheck == 1:
+        #     now = datetime.fromtimestamp(2)
+        # elif self.datecheck == 2:
+        #     now = datetime.fromtimestamp(1)
+        # else:
 
-            self.time_now = datetime.now()
+            # self.time_now = datetime.now()
 
-            now = self.time_now.time()
-
+            # Время при инициализации
+        now = self.time_now.time()
+            # Время сейчас
             # now = datetime.now().time()
 
         # ЗАПИСЫВАЕМ ВРЕМЯ
+        # А в нашей команде его обновляем
+        self.time_now = datetime.now()
+
         return str(now.strftime("%H:%M:%S")).encode()
 
     # Запись в файл текущего времени - ЭТО ОЧЕНЬ ВАЖНО
